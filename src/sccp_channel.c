@@ -1619,19 +1619,14 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 	}
 
 	pbx_channel_lock(channel->owner);
+	RAII(PBX_CHANNEL_TYPE *, pbx_channel, pbx_channel_ref(channel->owner), pbx_channel_unref);
 	if (pbx_channel_state(channel->owner) == AST_STATE_UP) {
 		pbx_log(LOG_ERROR, "SCCP: (%s) Channel '%s' already answered elsewhere\n", __func__, channel->designator);
 		channel->answered_elsewhere = TRUE;
+		pbx_channel_unlock(channel->owner);
 		return;
 	}
 	iPbx.set_callstate(channel, AST_STATE_UP);
-	RAII(PBX_CHANNEL_TYPE *, pbx_channel, pbx_channel_ref(channel->owner), pbx_channel_unref);
-	if(sccp_strlen_zero(pbx_builtin_getvar_helper(pbx_channel, "SCCP_DEVICE_ANSWERING"))) {
-		pbx_builtin_setvar_helper(pbx_channel, "SCCP_DEVICE_ANSWERING", device->id);
-	} else {
-		pbx_log(LOG_NOTICE, "%s: Call %s is already being answered by someone else\n", DEV_ID_LOG(device), channel->designator);
-		return;
-	}
 	pbx_channel_unlock(channel->owner);
 
 	sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) Answer Channel %s\n", DEV_ID_LOG(device), __func__, channel->designator);
