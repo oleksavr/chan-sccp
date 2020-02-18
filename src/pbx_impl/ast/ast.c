@@ -643,13 +643,6 @@ static boolean_t sccp_astgenwrap_handleHangup(constChannelPtr c, const char * ha
 				break;
 			}
 			pbx_channel_lock(pbx_channel);
-			if (pbx_test_flag(pbx_channel_flags(pbx_channel), AST_FLAG_BLOCKING)) {
-				sccp_log(DEBUGCAT_PBX)("%s: (%s): Blocker detected, SIGURG signal sent\n", c->designator, hanguptype);
-				pthread_kill(ast_channel_blocker(pbx_channel), SIGURG);
-				sched_yield();
-				pbx_safe_sleep(pbx_channel, 1000);
-			}
-			
 			if (pbx_check_hangup(pbx_channel)) {
 				// already being hungup
 				sccp_log(DEBUGCAT_PBX)("%s: (%s): Already being hungup, giving up\n", c->designator, hanguptype);
@@ -672,7 +665,18 @@ static boolean_t sccp_astgenwrap_handleHangup(constChannelPtr c, const char * ha
 				res = TRUE;
 				break;
  			}
- 			if (SCCP_CHANNELSTATE_Idling(c->state) || SCCP_CHANNELSTATE_IsDialing(c->state) || SCCP_CHANNELSTATE_IsTerminating(c->state)) {
+			if (pbx_test_flag(pbx_channel_flags(pbx_channel), AST_FLAG_BLOCKING)) {	/* not sure if required */
+				// blocking while being the initiator of the call, strange
+				sccp_log(DEBUGCAT_PBX)("%s: (%s): Blocker detected, SIGURG signal sent\n", c->designator, hanguptype);
+				pthread_kill(ast_channel_blocker(pbx_channel), SIGURG);
+				sched_yield();
+				pbx_safe_sleep(pbx_channel, 1000);
+				pbx_channel_unlock(pbx_channel);
+				res = TRUE;
+				break;
+			}
+			if (SCCP_CHANNELSTATE_Idling(c->state) || SCCP_CHANNELSTATE_IsDialing(c->state) || SCCP_CHANNELSTATE_IsTerminating(c->state)) {
+				/* hard hangup for all partially started calls */
 				sccp_log(DEBUGCAT_PBX)("%s: (%s): Hard Hangup\n", c->designator, hanguptype);
 				pbx_channel_unlock(pbx_channel);
 				ast_hangup(pbx_channel);
