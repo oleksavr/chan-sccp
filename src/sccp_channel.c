@@ -1621,7 +1621,7 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 	pbx_channel_lock(channel->owner);
 	RAII(PBX_CHANNEL_TYPE *, pbx_channel, pbx_channel_ref(channel->owner), pbx_channel_unref);
 	if (pbx_channel_state(channel->owner) == AST_STATE_UP) {
-		pbx_log(LOG_ERROR, "SCCP: (%s) Channel '%s' already answered elsewhere\n", __func__, channel->designator);
+		pbx_log(LOG_NOTICE, "SCCP: (%s) Channel '%s' already answered elsewhere\n", __func__, channel->designator);
 		channel->answered_elsewhere = TRUE;
 		pbx_channel_unlock(channel->owner);
 		return;
