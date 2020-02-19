@@ -1621,18 +1621,16 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 
 	pbx_channel_lock(channel->owner);
 	RAII(PBX_CHANNEL_TYPE *, pbx_channel, pbx_channel_ref(channel->owner), pbx_channel_unref);
-	/*if (pbx_channel_state(pbx_channel) < AST_STATE_OFFHOOK) {
-		iPbx.set_callstate(channel, AST_STATE_OFFHOOK);
-	}*/
-	if(pbx_channel_state(pbx_channel) != AST_STATE_UP) {
-		iPbx.queue_control(pbx_channel, AST_CONTROL_ANSWER);
-		pbx_setstate(pbx_channel, AST_STATE_UP);
-	} else {
+	if(pbx_channel_state(pbx_channel) == AST_STATE_UP || ast_channel_is_bridged(pbx_channel)) {
 		pbx_log(LOG_NOTICE, "%s: (%s) Channel '%s' already answered elsewhere\n", DEV_ID_LOG(device), __func__, channel->designator);
 		pbx_channel_set_hangupcause(pbx_channel, AST_CAUSE_ANSWERED_ELSEWHERE);
 		pbx_channel_unlock(pbx_channel);
+		sccp_channel_endcall(channel);
 		return;
 	}
+	// iPbx.queue_control(pbx_channel, AST_CONTROL_ANSWER);
+	iPbx.queue_control(pbx_channel, AST_CONTROL_PROGRESS);
+	pbx_setstate(pbx_channel, AST_STATE_UP);
 	pbx_channel_unlock(pbx_channel);
 
 	sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) Answer Channel %s\n", DEV_ID_LOG(device), __func__, channel->designator);
