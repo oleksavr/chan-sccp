@@ -36,6 +36,7 @@ SCCP_FILE_VERSION(__FILE__, "");
 #include "sccp_threadpool.h"
 #include <asterisk/callerid.h>			// sccp_channel, sccp_callinfo
 #include <asterisk/pbx.h>			// AST_EXTENSION_NOT_INUSE
+#include <asterisk/named_locks.h>
 
 static uint32_t callCount = 1;
 int __sccp_channel_destroy(const void * data);
@@ -1620,14 +1621,19 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 
 	pbx_channel_lock(channel->owner);
 	RAII(PBX_CHANNEL_TYPE *, pbx_channel, pbx_channel_ref(channel->owner), pbx_channel_unref);
-	if (pbx_channel_state(channel->owner) == AST_STATE_UP) {
+	/*if (pbx_channel_state(pbx_channel) < AST_STATE_OFFHOOK) {
+		iPbx.set_callstate(channel, AST_STATE_OFFHOOK);
+	}*/
+	if(pbx_channel_state(pbx_channel) != AST_STATE_UP) {
+		iPbx.queue_control(pbx_channel, AST_CONTROL_ANSWER);
+		pbx_setstate(pbx_channel, AST_STATE_UP);
+	} else {
 		pbx_log(LOG_NOTICE, "%s: (%s) Channel '%s' already answered elsewhere\n", DEV_ID_LOG(device), __func__, channel->designator);
-		channel->answered_elsewhere = TRUE;
-		pbx_channel_unlock(channel->owner);
+		pbx_channel_set_hangupcause(pbx_channel, AST_CAUSE_ANSWERED_ELSEWHERE);
+		pbx_channel_unlock(pbx_channel);
 		return;
 	}
-	iPbx.set_callstate(channel, AST_STATE_UP);
-	pbx_channel_unlock(channel->owner);
+	pbx_channel_unlock(pbx_channel);
 
 	sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) Answer Channel %s\n", DEV_ID_LOG(device), __func__, channel->designator);
 
@@ -1651,8 +1657,6 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 		}
 	}
 #endif
-
-	sccp_log((DEBUGCAT_CHANNEL + DEBUGCAT_CORE)) (VERBOSE_PREFIX_3 "%s: Answer channel %s\n", device->id, channel->designator);
 
 	/* answering an incoming call */
 	/* look if we have a call to put on hold */
@@ -1762,7 +1766,7 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 			sccp_log_and((DEBUGCAT_CORE + DEBUGCAT_HIGH)) (VERBOSE_PREFIX_3 "%s: (sccp_channel_answer) Go OffHook\n", d->id);
 			if (channel->state != SCCP_CHANNELSTATE_OFFHOOK) {
 				sccp_indicate(d, channel, SCCP_CHANNELSTATE_OFFHOOK);
-				iPbx.set_callstate(channel, AST_STATE_OFFHOOK);
+				// iPbx.set_callstate(channel, AST_STATE_OFFHOOK);
 			}
 
 			/* set devicevariables */
