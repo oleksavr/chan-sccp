@@ -36,7 +36,6 @@ SCCP_FILE_VERSION(__FILE__, "");
 #include "sccp_threadpool.h"
 #include <asterisk/callerid.h>			// sccp_channel, sccp_callinfo
 #include <asterisk/pbx.h>			// AST_EXTENSION_NOT_INUSE
-#include <asterisk/named_locks.h>
 
 static uint32_t callCount = 1;
 int __sccp_channel_destroy(const void * data);
@@ -1597,6 +1596,7 @@ channelPtr sccp_channel_newcall(constLinePtr l, constDevicePtr device, const cha
  *       Adding a mutex for just c->state should not be impossible, be would require quite a bit of lock debugging (again)
  *       Can also be solved atomically by using a CAS32 / ATOMIC_INCR
  */
+AST_MUTEX_DEFINE_STATIC(answer_lock);
 void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 {
 	if (!channel || !channel->line) {
@@ -1619,18 +1619,29 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 		return;
 	}
 
+	SCOPED_MUTEX(lock, &answer_lock);
 	pbx_channel_lock(channel->owner);
 	RAII(PBX_CHANNEL_TYPE *, pbx_channel, pbx_channel_ref(channel->owner), pbx_channel_unref);
+	uint16_t lineInstance = sccp_device_find_index_for_line(device, channel->line->name);
 	if(pbx_channel_state(pbx_channel) == AST_STATE_UP || ast_channel_is_bridged(pbx_channel)) {
 		pbx_log(LOG_NOTICE, "%s: (%s) Channel '%s' already answered elsewhere\n", DEV_ID_LOG(device), __func__, channel->designator);
-		pbx_channel_set_hangupcause(pbx_channel, AST_CAUSE_ANSWERED_ELSEWHERE);
+		ast_queue_hangup_with_cause(pbx_channel, AST_CAUSE_ANSWERED_ELSEWHERE);
+		sccp_dev_displayprompt(device, lineInstance, channel->callid, SKINNY_DISP_IN_CONFERENCE_ALREADY, GLOB(digittimeout));
+		sccp_dev_starttone(device, SKINNY_TONE_BEEPBONK, lineInstance, channel->callid, SKINNY_TONEDIRECTION_USER);
 		pbx_channel_unlock(pbx_channel);
-		sccp_channel_endcall(channel);
 		return;
 	}
-	// iPbx.queue_control(pbx_channel, AST_CONTROL_ANSWER);
-	iPbx.queue_control(pbx_channel, AST_CONTROL_PROGRESS);
-	pbx_setstate(pbx_channel, AST_STATE_UP);
+	if(channel->isHangingUp || pbx_channel_hangupcause(pbx_channel) == AST_CAUSE_ANSWERED_ELSEWHERE || channel->answered_elsewhere) {
+		pbx_log(LOG_NOTICE, "%s: (%s) Channel '%s' already hanging up\n", DEV_ID_LOG(device), __func__, channel->designator);
+		sccp_dev_displayprompt(device, lineInstance, channel->callid, SKINNY_DISP_IN_CONFERENCE_ALREADY, GLOB(digittimeout));
+		sccp_dev_starttone(device, SKINNY_TONE_BEEPBONK, lineInstance, channel->callid, SKINNY_TONEDIRECTION_USER);
+		pbx_channel_unlock(pbx_channel);
+		return;
+	}
+	pbx_log(LOG_NOTICE, "%s: (%s) Channel '%s' pbx_channel_state:'%d'\n", DEV_ID_LOG(device), __func__, channel->designator, (int)pbx_channel_state(pbx_channel));
+	// iPbx.queue_control(pbx_channel, AST_CONTROL_PROGRESS);
+	iPbx.queue_control(pbx_channel, AST_CONTROL_ANSWER);
+	// pbx_setstate(pbx_channel, AST_STATE_UP);
 	pbx_channel_unlock(pbx_channel);
 
 	sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) Answer Channel %s\n", DEV_ID_LOG(device), __func__, channel->designator);
