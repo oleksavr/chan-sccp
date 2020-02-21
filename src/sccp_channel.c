@@ -686,6 +686,7 @@ void sccp_channel_openReceiveChannel(constChannelPtr channel)
 		
 	audio->reception.c = sccp_channel_retain(channel);
 	d->protocol->sendOpenReceiveChannel(d, audio->reception.c);								// extra channel retain, released when receive channel is closed
+
 #ifdef CS_SCCP_VIDEO
 	if (sccp_channel_getVideoMode(channel) != SCCP_VIDEO_MODE_OFF && sccp_device_isVideoSupported(d)) {
 		sccp_log((DEBUGCAT_RTP)) (VERBOSE_PREFIX_3 "%s: We can have video, try to start vrtp\n", d->id);
@@ -733,29 +734,43 @@ int sccp_channel_receiveChannelOpen(sccp_device_t *d, sccp_channel_t *c)
 
 	pbx_mutex_lock(&GLOB(answer_lock));
 	pbx_channel_lock(c->owner);
-	if (c->owner) {
+	if(c->owner && pbx_channel_state(c->owner) != AST_STATE_UP && ((audio->reception.state & SCCP_RTP_STATUS_ACTIVE) && (audio->transmission.state & SCCP_RTP_STATUS_ACTIVE))
+	   && (SCCP_CHANNELSTATE_IsSettingUp(c->state) || SCCP_CHANNELSTATE_IsConnected(c->state))) {
 		// indicate up state only if both transmit and receive is done - this should fix the 1sek delay -MC
 		// handle out of order arrival when startMediaAck returns before openReceiveChannelAck
 		if (c->calltype == SKINNY_CALLTYPE_INBOUND) {
+			iPbx.set_callstate(c, AST_STATE_UP);
 			c->answer_winner = c->callid;
 			pbx_cond_broadcast(&GLOB(answer_cond));
 		} else {
-			iPbx.queue_control(c->owner, (enum ast_control_frame_type)-1);						// 'PROD' the remote side to let them know
-																// we can receive inband signalling from this
-																// moment onwards -> inband signalling required
-			if (    SCCP_CHANNELSTATE_IsConnected(c->state) &&
-				(audio->reception.state & SCCP_RTP_STATUS_ACTIVE) &&
-				(audio->transmission.state & SCCP_RTP_STATUS_ACTIVE) &&
-				pbx_channel_state(c->owner) != AST_STATE_UP
-			) {
-				iPbx.set_callstate(c, AST_STATE_UP);
-			}
+			// 'PROD' the remote side to let them know we can receive inband signalling
+			iPbx.queue_control(c->owner, (enum ast_control_frame_type) - 1);
 		}
 	}
 	pbx_channel_unlock(c->owner);
 	pbx_mutex_unlock(&GLOB(answer_lock));
 	return SCCP_RTP_STATUS_ACTIVE;
 }
+
+/*
+// sccp_actions.c:
+//    if (sem_post(&(audio->mutex))) exit(semaphore_error);
+
+rtp_status_t *openreceivechannel1(sccp_channel_t *c) {
+
+// async
+	if (sem_init(&(audio->mutex), THREAD_SEMAPHORE, 0)) {
+		return (void *) semaphore_error;
+	}
+	sem_init(&(rtp->mutex), THREAD_SEMAPHORE, 0);
+	add_work(threadpool, openOpenReceiveChannel, c);								// extra channel retain, released when receive channel is closed
+
+// await
+	if (sem_wait(&(rtp->mutex))) return (void *) semaphore_error;
+	sem_destroy(&(audio->mutex));
+	return *audio->reception.state;
+}
+*/
 
 /*!
  * \brief Tell Device to Close an RTP Receive Channel and Stop Media Transmission
@@ -896,19 +911,14 @@ int sccp_channel_mediaTransmissionStarted(devicePtr d, channelPtr c)
 
 	pbx_mutex_lock(&GLOB(answer_lock));
 	pbx_channel_lock(c->owner);
-	if (c->owner) {
-		// indicate up state only if both transmit and receive is done - this should fix the 1sek delay -MC
+
+	// indicate up state only if both transmit and receive is done - this should fix the 1sek delay -MC
+	if(c->owner && pbx_channel_state(c->owner) != AST_STATE_UP && ((audio->reception.state & SCCP_RTP_STATUS_ACTIVE) && (audio->transmission.state & SCCP_RTP_STATUS_ACTIVE))
+	   && (SCCP_CHANNELSTATE_IsSettingUp(c->state) || SCCP_CHANNELSTATE_IsConnected(c->state))) {
 		if (c->calltype == SKINNY_CALLTYPE_INBOUND) {
+			iPbx.set_callstate(c, AST_STATE_UP);
 			c->answer_winner = c->callid;
 			pbx_cond_broadcast(&GLOB(answer_cond));
-		} else {
-			if (
-				(c->state == SCCP_CHANNELSTATE_CONNECTED || c->state == SCCP_CHANNELSTATE_CONNECTEDCONFERENCE) &&
-				((audio->reception.state & SCCP_RTP_STATUS_ACTIVE) && (audio->transmission.state & SCCP_RTP_STATUS_ACTIVE)) &&
-				pbx_channel_state(c->owner) != AST_STATE_UP
-			) {
-				iPbx.set_callstate(c, AST_STATE_UP);
-			}
 		}
 	}
 	pbx_channel_unlock(c->owner);
@@ -1709,6 +1719,13 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 		iPbx.set_callerid_name(channel->owner, tmpName);
 	}
 
+	// app_dial is waiting for one of the huntgroup channels to do the following
+	// AST_STATE_UP
+	// it will read then read a single frame
+	// looking for AST_CONTROL_ANSWER
+	//
+	// openReceiveChannel + startmediatransmission will set AST_STATE_UP if successfull
+	// it will broadcast back here who ever was the winner
 	sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) Attempt to Answer Channel %s\n", d->id, __func__, channel->designator);
 	{
 		// indicate SCCP_CHANNELSTATE_CONNECTED indication asynchronously
@@ -1729,16 +1746,19 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 	}
 
 	// let's make sure we are the winner / recheck conditions
+	// should not be necessary any more, if we add a named_answer_lock
 	{
 		if (timed_out == ETIMEDOUT) {
 			sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) TIMED_OUT(%d) during answer race.\n", d->id, __func__, timed_out);
 			//sccp_indicate(d, c, SCCP_CHANNELSTATE_CONGESTION);
+			iPbx.set_callstate(c, AST_STATE_DOWN);
 			return;
 		}
 
 		if (c->answer_winner != c->callid) {
 			sccp_log((DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: (%s) Lost the race to answer this line..\n", d->id, __func__, c->answer_winner);
 			sccp_device_sendcallstate(d, ld->lineInstance, c->callid, SKINNY_CALLSTATE_CONNECTED, SKINNY_CALLPRIORITY_NORMAL, SKINNY_CALLINFO_VISIBILITY_DEFAULT);	/** send connected, so it is not listed as missed call */
+			iPbx.set_callstate(c, AST_STATE_DOWN);
 			return;
 		}
 
@@ -1751,8 +1771,8 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 	}
 
 	// ok we won the answer race
+	iPbx.set_callstate(c, AST_STATE_UP);                                        // making sure, in case startmediatransmission is a little slow
 	sccp_log((DEBUGCAT_CHANNEL + DEBUGCAT_CORE))(VERBOSE_PREFIX_3 "%s: Answering channel %s on line %s\n", d->id, channel->designator, l->name);
-	sccp_indicate(d, c, SCCP_CHANNELSTATE_CONNECTED);
 
 	/* end callforwards if any */
 	sccp_channel_end_forwarding_channel(channel);
@@ -1771,9 +1791,8 @@ void sccp_channel_answer(constDevicePtr device, channelPtr channel)
 		pbx_log(LOG_NOTICE, "%s: request monitor\n", d->id);
 		sccp_feat_monitor(d, NULL, 0, channel);
 	}
-
+	sccp_indicate(d, c, SCCP_CHANNELSTATE_CONNECTED);
 	iPbx.queue_control(c->owner, AST_CONTROL_ANSWER);
-	iPbx.set_callstate(c, AST_STATE_UP);
 
 #ifdef CS_MANAGER_EVENTS
 	if(GLOB(callevents)) {
